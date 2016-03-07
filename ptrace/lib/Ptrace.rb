@@ -2,7 +2,7 @@
 # Copyright 2011 Thoughtgang <http://www.thoughtgang.org>
 # Ruby additions to Ptrace extension
 
-require 'Ptrace_ext'            # Load C extension wrapping ptrace(3)
+require_relative './Ptrace_ext.so'            # Load C extension wrapping ptrace(3)
 require 'forwardable'
 
 =begin rdoc
@@ -30,7 +30,7 @@ module Ptrace
   end
 
 =begin rdoc
-Requested command is not listed in PTRACE_COMMANDS and is considered 
+Requested command is not listed in PTRACE_COMMANDS and is considered
 unsupported.
 =end
   class OperationNotSupportedError < Error
@@ -44,7 +44,7 @@ Debugger based on the #defines in sys/ptrace.h.
   PTRACE_COMMANDS = Debugger.commands
 
 =begin rdoc
-Hash mapping syscall numbers to syscall names (stored as Symbols). This is 
+Hash mapping syscall numbers to syscall names (stored as Symbols). This is
 filled by the Debugger based on the #defined in sys/syscalls.h.
 =end
   SYSCALL_MAP = Debugger.syscalls
@@ -205,7 +205,7 @@ InvalidProcessError if the target process has exited.
   # -----------------------------------------------------------------------
 =begin rdoc
 The CPU registers for the process. This acts as a Hash mapping register names
-to contents. The Hash acts as a snapshot of the CPU state; the registers are 
+to contents. The Hash acts as a snapshot of the CPU state; the registers are
 read from the process using read(), and written to the process using write().
 
 Usage:
@@ -215,7 +215,7 @@ Usage:
   regs['eax'] = 0x0
   regs.write
 =end
-  class RegSet 
+  class RegSet
     extend Forwardable
     extend Enumerable
 
@@ -373,7 +373,7 @@ Ptrace options.
 
 =begin rdoc
 Create a Ptrace::Target object for process 'pid'. The process is assumed to
-have been launched or attached to by ptrace, e.g. using Target.launch or 
+have been launched or attached to by ptrace, e.g. using Target.launch or
 Target.attach.
 =end
     def initialize(pid)
@@ -383,9 +383,23 @@ Target.attach.
       @user = MemArea.new(MemArea::MEM_USER, pid)
       @regs = RegSet.new(RegSet::GEN, pid)
       @fpregs = RegSet.new(RegSet::FP, pid)
-      @fpxregs = RegSet.new(RegSet::Ext, pid)
+      @fpxregs = RegSet.new(RegSet::EXT, pid)
       @options = Options.new(pid)
       @valid = true
+    end
+
+    def wait_for_signal(*signals)
+      signals = signals.map{|str| ::Signal.list[str]}
+      loop do
+        Process.waitpid(@pid)
+        status = $?
+        if signals.include?(status.stopsig)
+          return status
+        else
+          puts "unexpected status #{status}"
+          ptrace_send(:cont, status.stopsig)
+        end
+      end
     end
 
 =begin rdoc
@@ -396,7 +410,7 @@ Raises an exception if the attach fails.
       tgt = Target.new(pid)
       begin
         Ptrace::Debugger.send_cmd( Ptrace::Debugger.commands[:attach], pid, nil)
-        Process.waitpid(pid)
+        tgt.wait_for_signal(pid)
       rescue RuntimeError => e
         case e.message
           when 'PTRACE: Operation not permitted'
@@ -411,7 +425,7 @@ Raises an exception if the attach fails.
     end
 
 =begin rdoc
-PT_TRACE_ME : Launch command 'cmd' and return a Ptrace::Target object for 
+PT_TRACE_ME : Launch command 'cmd' and return a Ptrace::Target object for
 controlling it.
 Raises an exception if the command cannot be launched; returns nil if
 the command cannot be traced.
@@ -420,8 +434,7 @@ the command cannot be traced.
       pid = fork
       if ! pid
         begin
-          Ptrace::Debugger.send_cmd(Ptrace::Debugger.commands[:traceme], nil, 
-                                    nil)
+          Ptrace::Debugger.send_cmd(Ptrace::Debugger.commands[:traceme], nil, nil)
           exec(cmd)
         rescue RuntimeError => e
           case e.message
@@ -433,13 +446,11 @@ the command cannot be traced.
               raise
           end
         end
-
       elsif pid == -1
         return nil
-
       else
-        Process.waitpid(pid)
         tgt = Target.new(pid)
+        tgt.wait_for_signal(pid, "TRAP", "STOP")
         return tgt
       end
     end
@@ -456,7 +467,7 @@ the command cannot be traced.
 =end
     def event_msg
       # send signal
-      # For PTRACE_EVENT_EXIT this is the child's exit status. For PTRACE_EVENT_FORK, PTRACE_EVENT_VFORK and PTRACE_EVENT_CLONE this is the PID of the new process. 
+      # For PTRACE_EVENT_EXIT this is the child's exit status. For PTRACE_EVENT_FORK, PTRACE_EVENT_VFORK and PTRACE_EVENT_CLONE this is the PID of the new process.
       # Debugger.event_msg
     end
 
@@ -466,7 +477,7 @@ Note: This makes the Ptrace::Target object invalid.
 =end
     def kill
       ptrace_send( :kill )
-      Process.waitpid(@pid)
+      wait_for_signal()
       @valid = false
     end
 
@@ -476,7 +487,7 @@ Note: This makes the Ptrace::Target object invalid.
 =end
     def detach
       ptrace_send( :detach )
-      Process.waitpid(@pid)
+      wait_for_signal()
       @valid = false
     end
 
@@ -485,7 +496,6 @@ PT_STEP : Step a single instruction.
 =end
     def step
       ptrace_send( :singlestep )
-      Process.waitpid(@pid)
     end
 
 =begin rdoc
@@ -499,13 +509,13 @@ Usage:
 =end
     def syscall
       ptrace_send( :syscall )
-      Process.waitpid(@pid)
+      wait_for_signal(@pid)
     end
 
 =begin rdoc
 Wrapper for recording syscalls. This issues a PT_SYSCALL to stop the target at
 the next syscall, records the 'in' register set, issues a PT_SYSCALL to stop the
-target after the syscall returns, records the 'out' register set, and 
+target after the syscall returns, records the 'out' register set, and
 returns a Hash  { :in, :out } of the register sets. The target is stopped
 on return from this syscall.
 =end
@@ -528,7 +538,11 @@ PT_CONTINUE: Continue execution of target.
 =end
     def cont
       ptrace_send( :cont )
-      Process.waitpid(@pid)
+      wait_for_signal(@pid)
+    end
+
+    def cont_nonblocking(signal = nil)
+      ptrace_send( :cont, signal)
     end
 
 =begin rdoc

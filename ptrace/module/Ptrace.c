@@ -1318,16 +1318,18 @@ static VALUE build_option_hash( void ) {
 
 /* ---------------------------------------------------------------------- */
 
-static long int_ptrace_raw( enum __ptrace_request req, VALUE pid, void * addr, 
-			    void * data )  {
-	pid_t tgt;
-	long rv;
+static long int_ptrace_raw( enum __ptrace_request req, VALUE pid, void * addr,
+          void * data )  {
+  pid_t tgt;
+  long rv;
 
-	tgt = num_to_pid(pid);
-	rv = ptrace(req, tgt, addr, data);
-	if ( rv == -1l ) {
-		 rb_raise(rb_eRuntimeError, "PTRACE: %s", strerror(errno));
-	}
+  tgt = num_to_pid(pid);
+  rv = ptrace(req, tgt, addr, data);
+  // only raise an error if the return value is -1 and an error was
+  // encountered because PTRACE_PEEKUSER can correctly return -1
+  if ( rv == -1l && errno != 0) {
+     rb_raise(rb_eRuntimeError, "PTRACE: %s", strerror(errno));
+  }
 
 	return rv;
 }
